@@ -1,7 +1,6 @@
 import os
 import telebot
 import yfinance as yf
-import pandas as pd
 from google import genai
 
 # =====================
@@ -14,9 +13,9 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # =====================
-# SYMBOL NORMALIZER
+# SYMBOL MAP
 # =====================
-def normalize_symbol(user_input):
+def normalize_symbol(text):
     mapping = {
         "EURUSD": "EURUSD=X",
         "GBPUSD": "GBPUSD=X",
@@ -25,125 +24,118 @@ def normalize_symbol(user_input):
         "BTC": "BTC-USD",
         "ETH": "ETH-USD"
     }
-
-    return mapping.get(user_input.upper().strip(), "EURUSD=X")
-
+    return mapping.get(text.upper().strip(), "EURUSD=X")
 
 # =====================
-# MARKET DATA (FIXED)
+# MARKET DATA (SAFE)
 # =====================
 def get_data(symbol):
     try:
-        m15 = yf.download(symbol, interval="15m", period="5d")
-        h1 = yf.download(symbol, interval="60m", period="10d")
+        df = yf.download(symbol, interval="15m", period="5d")
 
-        # SAFE CHECK (prevents crash)
-        if m15.empty or h1.empty:
-            return None, None
+        if df is None or df.empty or len(df) < 50:
+            return None
 
-        for df in [m15, h1]:
-            df["EMA20"] = df["Close"].ewm(span=20).mean()
-            df["EMA200"] = df["Close"].ewm(span=200).mean()
+        df["EMA20"] = df["Close"].ewm(span=20).mean()
+        df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-        return m15, h1
+        return df
 
     except Exception:
-        return None, None
-
+        return None
 
 # =====================
-# TREND
+# TREND (FIXED - NO SERIES BUG)
 # =====================
 def get_trend(df):
     last = df.iloc[-1]
 
-    if last["EMA20"] > last["EMA200"]:
+    ema20 = float(last["EMA20"])
+    ema200 = float(last["EMA200"])
+
+    if ema20 > ema200:
         return "BULLISH"
-    elif last["EMA20"] < last["EMA200"]:
+    elif ema20 < ema200:
         return "BEARISH"
     return "SIDEWAYS"
 
-
 # =====================
-# LIQUIDITY SWEEP
+# PRICE ACTION FILTER
 # =====================
 def liquidity_sweep(df):
-    recent_high = df["High"].rolling(20).max().iloc[-2]
-    recent_low = df["Low"].rolling(20).min().iloc[-2]
-    last_close = df["Close"].iloc[-1]
+    try:
+        if len(df) < 20:
+            return "NO_SWEEP"
 
-    if last_close > recent_high:
-        return "BUY_SWEEP"
-    elif last_close < recent_low:
-        return "SELL_SWEEP"
-    return "NO_SWEEP"
+        recent_high = df["High"].rolling(20).max().iloc[-2]
+        recent_low = df["Low"].rolling(20).min().iloc[-2]
+        last_close = df["Close"].iloc[-1]
 
+        if last_close > recent_high:
+            return "BUY_SWEEP"
+        elif last_close < recent_low:
+            return "SELL_SWEEP"
+
+        return "NO_SWEEP"
+
+    except Exception:
+        return "NO_SWEEP"
 
 # =====================
 # SCORE ENGINE
 # =====================
-def score_trade(h1_trend, m15_trend, sweep):
-    score = 40
-
-    if h1_trend == m15_trend:
-        score += 30
-    else:
-        score -= 20
+def score_trade(trend, sweep):
+    score = 50
 
     if sweep != "NO_SWEEP":
         score += 20
 
-    if h1_trend in ["BULLISH", "BEARISH"]:
-        score += 10
+    if trend in ["BULLISH", "BEARISH"]:
+        score += 20
 
     return max(0, min(100, score))
 
-
 # =====================
-# AI ENGINE
+# ANALYSIS ENGINE
 # =====================
 def analyze(user_input):
 
     symbol = normalize_symbol(user_input)
 
-    m15, h1 = get_data(symbol)
+    df = get_data(symbol)
 
-    # SAFE EXIT (NO CRASH)
-    if m15 is None or h1 is None:
+    # SAFE EXIT
+    if df is None:
         return "❌ No market data available. Try again later.", 0
 
-    h1_trend = get_trend(h1)
-    m15_trend = get_trend(m15)
-    sweep = liquidity_sweep(m15)
-    score = score_trade(h1_trend, m15_trend, sweep)
+    trend = get_trend(df)
+    sweep = liquidity_sweep(df)
+    score = score_trade(trend, sweep)
 
-    last_price = float(m15["Close"].iloc[-1])
+    last_price = float(df["Close"].iloc[-1])
 
     prompt = f"""
-You are a professional trading assistant.
+You are a professional trading analyst.
 
-Market Data:
-- H1 Trend: {h1_trend}
-- M15 Trend: {m15_trend}
-- Liquidity Event: {sweep}
-- Trade Score: {score}/100
-- Current Price: {last_price}
+PAIR: {symbol}
+TREND: {trend}
+LIQUIDITY: {sweep}
+SCORE: {score}/100
+PRICE: {last_price}
 
 Rules:
 - If score < 60 → NO TRADE
-- Do not invent data
-- Be strict and realistic
+- Be strict
+- Do not hallucinate data
 
 Return:
-
 PAIR:
 DIRECTION:
-ENTRY ZONE:
+ENTRY:
 STOP LOSS:
-TAKE PROFIT 1:
-TAKE PROFIT 2:
+TAKE PROFIT:
 REASON:
-QUALITY: High / Medium / Low
+QUALITY:
 """
 
     response = client.models.generate_content(
@@ -153,14 +145,12 @@ QUALITY: High / Medium / Low
 
     return response.text, score
 
-
 # =====================
 # TELEGRAM BOT
 # =====================
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.reply_to(message, "Stage 2 bot active. Send a pair like EURUSD.")
-
+    bot.reply_to(message, "Bot active. Send a pair like EURUSD")
 
 @bot.message_handler(func=lambda m: True)
 def handle(message):
@@ -171,18 +161,14 @@ def handle(message):
 
         bot.reply_to(
             message,
-            f"""
-📊 TRADE ANALYSIS
-
-Score: {score}/100
-
-{result}
-"""
+            f"📊 ANALYSIS\n\nScore: {score}/100\n\n{result}"
         )
 
     except Exception as e:
         bot.reply_to(message, f"⚠️ Error: {str(e)}")
 
-
+# =====================
+# RUN
+# =====================
 if __name__ == "__main__":
-    bot.infinity_polling()
+    bot.infinity_polling(skip_pending=True)
