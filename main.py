@@ -2,140 +2,201 @@ import os
 import telebot
 import pandas as pd
 import numpy as np
-from google import genai
+import yfinance as yf
+import google.generativeai as genai
 
-# ======================
-# ENV
-# ======================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# =========================
+# CONFIG
+# =========================
+bot = telebot.TeleBot(os.getenv("TELEGRAM_BOT_TOKEN"))
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-MODEL = "gemini-2.0-flash"
+# =========================
+# DATA
+# =========================
 
-# ======================
-# MARKET DATA (TEMP SIMULATION)
-# Replace later with real API (OANDA, Binance, MT5 bridge)
-# ======================
-def get_market_data(symbol):
-    np.random.seed(len(symbol))
-
-    prices = np.cumsum(np.random.randn(200)) + 100
-    df = pd.DataFrame({"close": prices})
-
+def get_data(symbol, interval):
+    df = yf.download(symbol, interval=interval, period="5d")
+    df = df.dropna()
     return df
 
-# ======================
-# EMA ENGINE
-# ======================
-def calculate_ema(df):
-    df["ema20"] = df["close"].ewm(span=20).mean()
-    df["ema200"] = df["close"].ewm(span=200).mean()
-    return df
+# =========================
+# INDICATORS
+# =========================
 
-# ======================
-# SIGNAL ENGINE
-# ======================
-def generate_signal(df, symbol):
-    last_close = float(df["close"].iloc[-1])
-    ema20 = float(df["ema20"].iloc[-1])
-    ema200 = float(df["ema200"].iloc[-1])
+def ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
-    # Trend logic
-    if ema20 > ema200:
-        signal = "BUY"
-    elif ema20 < ema200:
-        signal = "SELL"
+def swings(df, lookback=3):
+    highs = df["High"]
+    lows = df["Low"]
+
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(lookback, len(df) - lookback):
+        if highs[i] == max(highs[i-lookback:i+lookback]):
+            swing_highs.append((i, highs[i]))
+        if lows[i] == min(lows[i-lookback:i+lookback]):
+            swing_lows.append((i, lows[i]))
+
+    return swing_highs, swing_lows
+
+# =========================
+# STRUCTURE ENGINE
+# =========================
+
+def market_structure(df):
+    swing_highs, swing_lows = swings(df)
+
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return "UNDEFINED"
+
+    hh = swing_highs[-1][1] > swing_highs[-2][1]
+    hl = swing_lows[-1][1] > swing_lows[-2][1]
+
+    lh = swing_highs[-1][1] < swing_highs[-2][1]
+    ll = swing_lows[-1][1] < swing_lows[-2][1]
+
+    if hh and hl:
+        return "BULLISH"
+    elif lh and ll:
+        return "BEARISH"
     else:
-        signal = "WAIT"
+        return "RANGE"
 
-    entry = last_close
-    sl = ema200 if signal == "BUY" else ema20
-    tp = entry + (abs(entry - sl) * 2)
+# =========================
+# LIQUIDITY SWEEP (simple but real)
+# =========================
 
-    rr = abs(tp - entry) / abs(entry - sl) if entry != sl else 0
-    quality = "LOW QUALITY" if rr < 1.5 else "HIGH QUALITY"
+def liquidity_sweep(df):
+    highs = df["High"].values
+    lows = df["Low"].values
+    closes = df["Close"].values
+
+    # sweep high then reject
+    if highs[-1] > max(highs[-20:-2]) and closes[-1] < highs[-1]:
+        return "BEARISH_SWEEP"
+
+    # sweep low then reject
+    if lows[-1] < min(lows[-20:-2]) and closes[-1] > lows[-1]:
+        return "BULLISH_SWEEP"
+
+    return "NONE"
+
+# =========================
+# STRATEGY ENGINE
+# =========================
+
+def analyze(symbol):
+
+    m15 = get_data(symbol, "15m")
+    h1 = get_data(symbol, "60m")
+
+    if len(m15) < 50 or len(h1) < 50:
+        return {"status": "NO TRADE", "reason": "Not enough data"}
+
+    # EMA trend (H1)
+    h1["ema20"] = ema(h1["Close"], 20)
+    h1["ema200"] = ema(h1["Close"], 200)
+
+    trend = "BUY" if h1["ema20"].iloc[-1] > h1["ema200"].iloc[-1] else "SELL"
+
+    # Structure
+    struct = market_structure(m15)
+
+    # Liquidity
+    sweep = liquidity_sweep(m15)
+
+    price = float(m15["Close"].iloc[-1])
+
+    # FILTERS
+    if struct == "UNDEFINED":
+        return {"status": "NO TRADE", "reason": "Weak structure"}
+
+    if trend == "BUY" and struct != "BULLISH":
+        return {"status": "NO TRADE", "reason": "Trend-structure mismatch"}
+
+    if trend == "SELL" and struct != "BEARISH":
+        return {"status": "NO TRADE", "reason": "Trend-structure mismatch"}
+
+    if trend == "BUY" and sweep != "BULLISH_SWEEP":
+        return {"status": "NO TRADE", "reason": "No liquidity confirmation"}
+
+    if trend == "SELL" and sweep != "BEARISH_SWEEP":
+        return {"status": "NO TRADE", "reason": "No liquidity confirmation"}
+
+    sl = price * (0.997 if trend == "BUY" else 1.003)
+    tp = price * (1.006 if trend == "BUY" else 0.994)
+
+    rr = abs(tp - price) / abs(price - sl)
+
+    if rr < 1.5:
+        return {"status": "NO TRADE", "reason": "Low RR"}
 
     return {
-        "symbol": symbol,
-        "signal": signal,
-        "entry": round(entry, 5),
-        "sl": round(sl, 5),
-        "tp": round(tp, 5),
+        "status": trend,
+        "entry": price,
+        "sl": sl,
+        "tp": tp,
         "rr": round(rr, 2),
-        "quality": quality
+        "structure": struct,
+        "sweep": sweep
     }
 
-# ======================
-# GEMINI FORMATTER (OPTIONAL)
-# ======================
-def explain(signal):
-    if not client:
-        return None
+# =========================
+# GEMINI FORMAT ONLY
+# =========================
 
-    try:
-        prompt = f"""
-You are a trading assistant.
+def format_signal(signal, symbol):
 
-Format this into a clean Telegram signal:
+    if signal["status"] == "NO TRADE":
+        return f"⚠️ NO TRADE\nReason: {signal['reason']}"
 
-{signal}
+    prompt = f"""
+Format this trading signal:
 
-Keep it short, structured, professional.
+PAIR: {symbol}
+DIRECTION: {signal['status']}
+ENTRY: {signal['entry']}
+SL: {signal['sl']}
+TP: {signal['tp']}
+RR: {signal['rr']}
+STRUCTURE: {signal['structure']}
+LIQUIDITY: {signal['sweep']}
+
+Rules:
+- Do not change values
+- Only format cleanly for Telegram
 """
 
-        res = client.models.generate_content(
-            model=MODEL,
-            contents=prompt
-        )
-
-        return res.text
-
+    try:
+        return model.generate_content(prompt).text
     except:
-        return None
+        return str(signal)
 
-# ======================
+# =========================
 # TELEGRAM
-# ======================
-@bot.message_handler(commands=["start"])
-def start(msg):
-    bot.reply_to(msg, "Bot active. Send a pair like EURUSD or BTCUSD.")
+# =========================
 
 @bot.message_handler(func=lambda m: True)
-def handle(msg):
-    symbol = msg.text.strip().upper()
-
-    bot.reply_to(msg, "Analyzing market structure...")
-
+def handle(m):
     try:
-        df = get_market_data(symbol)
-        df = calculate_ema(df)
+        symbol = m.text.strip().upper()
 
-        signal = generate_signal(df, symbol)
+        if "USD" not in symbol:
+            bot.reply_to(m, "Send a valid pair like EURUSD or GBPUSD")
+            return
 
-        ai = explain(signal)
+        signal = analyze(symbol + "=X")
+        output = format_signal(signal, symbol)
 
-        if ai:
-            bot.reply_to(msg, ai)
-        else:
-            text = f"""
-📊 {signal['symbol']}
-📌 Signal: {signal['signal']}
-💰 Entry: {signal['entry']}
-🛑 SL: {signal['sl']}
-🎯 TP: {signal['tp']}
-📈 RR: {signal['rr']}
-⚠️ {signal['quality']}
-"""
-            bot.reply_to(msg, text)
+        bot.reply_to(m, output)
 
     except Exception as e:
-        bot.reply_to(msg, f"Error: {str(e)}")
+        bot.reply_to(m, f"Error: {str(e)}")
 
-# ======================
-# RUN
-# ======================
-print("Bot running...")
+print("SMC Bot running...")
 bot.infinity_polling()
