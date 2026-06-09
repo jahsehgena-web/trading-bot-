@@ -10,13 +10,15 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-    raise ValueError("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY in environment variables")
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY")
 
 # ======================
-# GEMINI SETUP (OLD SDK)
+# GEMINI (OLD SDK)
 # ======================
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+
+# IMPORTANT FIX: correct model for old SDK
+model = genai.GenerativeModel("models/gemini-pro")
 
 # ======================
 # TELEGRAM BOT
@@ -24,22 +26,19 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # ======================
-# SAFE MARKET ANALYSIS
-# FIXES ALL Series / float / boolean ERRORS
+# SAFE MARKET ANALYSIS (NO SERIES BUGS)
 # ======================
 def analyze_market(df):
     try:
         if df is None or len(df) < 2:
             return {"error": "Not enough data"}
 
-        # ALWAYS convert to single values
         close = float(df["close"].iloc[-1])
         open_ = float(df["open"].iloc[-1])
         high = float(df["high"].iloc[-1])
         low = float(df["low"].iloc[-1])
         prev_close = float(df["close"].iloc[-2])
 
-        # SAFE logic (no Series comparisons)
         if close > open_ and close > prev_close:
             trend = "bullish"
         elif close < open_ and close < prev_close:
@@ -73,7 +72,7 @@ def ask_gemini(prompt):
 # ======================
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.reply_to(message, "Bot is active. Send a pair like EURUSD or BTCUSD.")
+    bot.reply_to(message, "Bot is active. Send a pair like EURUSD.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
