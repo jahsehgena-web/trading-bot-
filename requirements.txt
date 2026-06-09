@@ -1,4 +1,5 @@
 pyTelegramBotAPI
 pandas
 numpy
-google-genai
+yfinance
+google-generativeai
