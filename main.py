@@ -14,17 +14,41 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # =====================
-# MARKET DATA
+# SYMBOL NORMALIZER
 # =====================
-def get_data(symbol="EURUSD=X"):
-    m15 = yf.download(symbol, interval="15m", period="5d")
-    h1 = yf.download(symbol, interval="60m", period="10d")
+def normalize_symbol(user_input):
+    mapping = {
+        "EURUSD": "EURUSD=X",
+        "GBPUSD": "GBPUSD=X",
+        "XAUUSD": "GC=F",
+        "GOLD": "GC=F",
+        "BTC": "BTC-USD",
+        "ETH": "ETH-USD"
+    }
 
-    for df in [m15, h1]:
-        df["EMA20"] = df["Close"].ewm(span=20).mean()
-        df["EMA200"] = df["Close"].ewm(span=200).mean()
+    return mapping.get(user_input.upper().strip(), "EURUSD=X")
 
-    return m15, h1
+
+# =====================
+# MARKET DATA (FIXED)
+# =====================
+def get_data(symbol):
+    try:
+        m15 = yf.download(symbol, interval="15m", period="5d")
+        h1 = yf.download(symbol, interval="60m", period="10d")
+
+        # SAFE CHECK (prevents crash)
+        if m15.empty or h1.empty:
+            return None, None
+
+        for df in [m15, h1]:
+            df["EMA20"] = df["Close"].ewm(span=20).mean()
+            df["EMA200"] = df["Close"].ewm(span=200).mean()
+
+        return m15, h1
+
+    except Exception:
+        return None, None
 
 
 # =====================
@@ -56,7 +80,7 @@ def liquidity_sweep(df):
 
 
 # =====================
-# SCORE SYSTEM
+# SCORE ENGINE
 # =====================
 def score_trade(h1_trend, m15_trend, sweep):
     score = 40
@@ -78,9 +102,15 @@ def score_trade(h1_trend, m15_trend, sweep):
 # =====================
 # AI ENGINE
 # =====================
-def analyze(symbol):
+def analyze(user_input):
+
+    symbol = normalize_symbol(user_input)
 
     m15, h1 = get_data(symbol)
+
+    # SAFE EXIT (NO CRASH)
+    if m15 is None or h1 is None:
+        return "❌ No market data available. Try again later.", 0
 
     h1_trend = get_trend(h1)
     m15_trend = get_trend(m15)
@@ -102,9 +132,9 @@ Market Data:
 Rules:
 - If score < 60 → NO TRADE
 - Do not invent data
-- Use Smart Money Concepts logic
+- Be strict and realistic
 
-Return format:
+Return:
 
 PAIR:
 DIRECTION:
@@ -125,11 +155,11 @@ QUALITY: High / Medium / Low
 
 
 # =====================
-# TELEGRAM
+# TELEGRAM BOT
 # =====================
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.reply_to(message, "Stage 2 bot is active. Send a pair like EURUSD.")
+    bot.reply_to(message, "Stage 2 bot active. Send a pair like EURUSD.")
 
 
 @bot.message_handler(func=lambda m: True)
@@ -151,7 +181,7 @@ Score: {score}/100
         )
 
     except Exception as e:
-        bot.reply_to(message, f"Error: {str(e)}")
+        bot.reply_to(message, f"⚠️ Error: {str(e)}")
 
 
 if __name__ == "__main__":
