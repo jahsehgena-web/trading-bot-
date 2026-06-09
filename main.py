@@ -1,6 +1,7 @@
 import os
 import telebot
 import yfinance as yf
+import numpy as np
 from google import genai
 
 # =====================
@@ -27,7 +28,7 @@ def normalize_symbol(text):
     return mapping.get(text.upper().strip(), "EURUSD=X")
 
 # =====================
-# MARKET DATA (SAFE)
+# DATA FETCH (HARDENED)
 # =====================
 def get_data(symbol):
     try:
@@ -35,6 +36,13 @@ def get_data(symbol):
 
         if df is None or df.empty or len(df) < 50:
             return None
+
+        df = df.copy()
+
+        # force clean numeric conversion
+        df["Close"] = df["Close"].astype(float)
+        df["High"] = df["High"].astype(float)
+        df["Low"] = df["Low"].astype(float)
 
         df["EMA20"] = df["Close"].ewm(span=20).mean()
         df["EMA200"] = df["Close"].ewm(span=200).mean()
@@ -45,13 +53,13 @@ def get_data(symbol):
         return None
 
 # =====================
-# TREND (FIXED - NO SERIES BUG)
+# TREND (100% SAFE SCALAR)
 # =====================
 def get_trend(df):
     last = df.iloc[-1]
 
-    ema20 = float(last["EMA20"])
-    ema200 = float(last["EMA200"])
+    ema20 = np.float64(last["EMA20"])
+    ema200 = np.float64(last["EMA200"])
 
     if ema20 > ema200:
         return "BULLISH"
@@ -60,16 +68,18 @@ def get_trend(df):
     return "SIDEWAYS"
 
 # =====================
-# PRICE ACTION FILTER
+# LIQUIDITY CHECK
 # =====================
 def liquidity_sweep(df):
     try:
-        if len(df) < 20:
+        if len(df) < 30:
             return "NO_SWEEP"
 
         recent_high = df["High"].rolling(20).max().iloc[-2]
         recent_low = df["Low"].rolling(20).min().iloc[-2]
         last_close = df["Close"].iloc[-1]
+
+        last_close = float(last_close)
 
         if last_close > recent_high:
             return "BUY_SWEEP"
@@ -87,10 +97,10 @@ def liquidity_sweep(df):
 def score_trade(trend, sweep):
     score = 50
 
-    if sweep != "NO_SWEEP":
+    if trend in ["BULLISH", "BEARISH"]:
         score += 20
 
-    if trend in ["BULLISH", "BEARISH"]:
+    if sweep != "NO_SWEEP":
         score += 20
 
     return max(0, min(100, score))
@@ -104,7 +114,6 @@ def analyze(user_input):
 
     df = get_data(symbol)
 
-    # SAFE EXIT
     if df is None:
         return "❌ No market data available. Try again later.", 0
 
@@ -126,9 +135,10 @@ PRICE: {last_price}
 Rules:
 - If score < 60 → NO TRADE
 - Be strict
-- Do not hallucinate data
+- Do not hallucinate
 
 Return:
+
 PAIR:
 DIRECTION:
 ENTRY:
