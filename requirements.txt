@@ -1,3 +1,4 @@
 pyTelegramBotAPI
-metaapi-cloud-sdk
 google-genai
+yfinance
+pandas
