@@ -18,9 +18,11 @@ model = genai.GenerativeModel('gemini-pro')
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 async def main():
-    # MetaApi must be initialized inside an async function
+    # Correct MetaApi initialization
     meta_api = MetaApi(METAAPI_TOKEN)
-    account = await meta_api.get_account(METAAPI_ACCOUNT_ID)
+    
+    # Retrieve the account
+    account = await meta_api.metaclients.get_account(METAAPI_ACCOUNT_ID)
     
     # Connect to your trading account
     connection = account.get_streaming_connection()
@@ -39,10 +41,11 @@ async def main():
         bot.reply_to(message, "🧠 AI is analyzing your input...")
         
         # Example Gemini call
-        response = model.generate_content(message.text)
-        
-        # Add your MetaApi trade execution logic here using 'connection'
-        bot.reply_to(message, f"✅ AI Response: {response.text}")
+        try:
+            response = model.generate_content(message.text)
+            bot.reply_to(message, f"✅ AI Response: {response.text}")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Error processing with AI: {str(e)}")
 
     # Keep the bot polling
     bot.infinity_polling()
