@@ -1,5 +1,4 @@
 import os
-import asyncio
 import telebot
 import pandas as pd
 import google.generativeai as genai
@@ -10,11 +9,14 @@ import google.generativeai as genai
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY in environment variables")
+
 # ======================
-# GEMINI SETUP
+# GEMINI SETUP (OLD SDK)
 # ======================
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-pro")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # ======================
 # TELEGRAM BOT
@@ -23,18 +25,21 @@ bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # ======================
 # SAFE MARKET ANALYSIS
+# FIXES ALL Series / float / boolean ERRORS
 # ======================
 def analyze_market(df):
     try:
         if df is None or len(df) < 2:
             return {"error": "Not enough data"}
 
+        # ALWAYS convert to single values
         close = float(df["close"].iloc[-1])
         open_ = float(df["open"].iloc[-1])
         high = float(df["high"].iloc[-1])
         low = float(df["low"].iloc[-1])
         prev_close = float(df["close"].iloc[-2])
 
+        # SAFE logic (no Series comparisons)
         if close > open_ and close > prev_close:
             trend = "bullish"
         elif close < open_ and close < prev_close:
@@ -54,7 +59,7 @@ def analyze_market(df):
         return {"error": str(e)}
 
 # ======================
-# GEMINI ANALYSIS WRAPPER
+# GEMINI CALL
 # ======================
 def ask_gemini(prompt):
     try:
@@ -68,7 +73,7 @@ def ask_gemini(prompt):
 # ======================
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.reply_to(message, "Bot is active. Send a pair like EURUSD or market data.")
+    bot.reply_to(message, "Bot is active. Send a pair like EURUSD or BTCUSD.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
@@ -77,7 +82,7 @@ def handle_message(message):
     try:
         user_input = message.text
 
-        # TEMP MOCK DATA (replace later with real feed)
+        # MOCK DATA (replace later with real feed)
         df = pd.DataFrame({
             "open": [1.100, 1.101],
             "high": [1.105, 1.108],
@@ -92,7 +97,7 @@ def handle_message(message):
             return
 
         prompt = f"""
-You are a trading analyst.
+You are a professional trading analyst.
 
 Market Data:
 {analysis}
@@ -100,7 +105,9 @@ Market Data:
 User Input:
 {user_input}
 
-Give BUY / SELL / WAIT with reasoning.
+Return:
+- BUY / SELL / WAIT
+- Clear reasoning
 """
 
         result = ask_gemini(prompt)
